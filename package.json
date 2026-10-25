@@ -1,0 +1,25 @@
+{
+  "name": "cityflex-app",
+  "version": "1.0.0",
+  "description": "CityFlex Rentals full-stack app with MySQL-backed role sessions",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "keywords": [
+    "cityflex",
+    "rentals",
+    "mysql",
+    "express"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.3.0",
+    "mysql2": "^3.12.0"
+  }
+}
