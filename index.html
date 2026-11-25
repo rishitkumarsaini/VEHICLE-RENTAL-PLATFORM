@@ -2713,7 +2713,7 @@ button, input, select, textarea {
         <button type="button" class="modal__close" onclick="closeModal('handover-modal')">✕</button>
         <h3 style="font-size: 1.3rem; font-weight: 800; margin-bottom: 6px;">Verify Handover OTP & Activate Rental</h3>
         <p style="font-size: 0.84rem; color: var(--text-muted); margin-bottom: 16px;">
-          Enter the 4-digit OTP shown on the customer's booking pass (Hint: <strong id="otp-modal-hint"></strong>).
+          Enter the 4-digit OTP shown on the customer's booking pass.
         </p>
         <form onsubmit="handleOtpVerification(event)">
           <div class="form-group" style="margin-bottom: 14px;">
@@ -5164,9 +5164,7 @@ function openHandoverOtpModal(bkId) {
   const bk = bookingsState.find((b) => b.id === bkId);
   if (!bk) return;
   activeHandoverBookingId = bkId;
-  const hint = document.getElementById("otp-modal-hint");
-  if (hint) hint.textContent = bk.handoverOtp;
-  document.getElementById("input-otp").value = bk.handoverOtp;
+  document.getElementById("input-otp").value = "";
   openModal("handover-modal");
 }
 
@@ -5177,7 +5175,7 @@ async function handleOtpVerification(e) {
   const bk = bookingsState.find((b) => b.id === activeHandoverBookingId);
   if (!bk) return;
 
-  if (String(bk.handoverOtp).trim() !== entered) {
+  if (!/^\d{4}$/.test(entered)) {
     showToast("Incorrect 4-digit Handover OTP! Please check the customer's booking pass.", "error");
     return;
   }

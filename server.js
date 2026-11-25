@@ -32,6 +32,27 @@ app.use((req, res, next) => {
 const SESSION_COOKIE = "cityflex_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
+const loginAttempts = new Map();
+const otpAttempts = new Map();
+function allowAttempt(store, key, max, windowMs) {
+  const now = Date.now();
+  let entry = store.get(key);
+  if (!entry || entry.until <= now) {
+    if (store.size >= 10000) {
+      for (const [k, v] of store) if (v.until <= now) store.delete(k);
+      if (store.size >= 10000) return false;
+    }
+    entry = { count: 0, until: now + windowMs };
+    store.set(key, entry);
+  }
+  if (entry.count >= max) return false;
+  entry.count += 1;
+  return true;
+}
+function hideHandoverOtp(booking) {
+  const { handoverOtp, ...safe } = booking;
+  return safe;
+}
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -206,6 +227,7 @@ async function resolveMySqlConfig() {
     await testConn.end();
     return DB_CONFIG;
   } catch (primaryErr) {
+    if (process.env.NODE_ENV === "production") throw primaryErr;
     const localSocket = process.env.DB_SOCKET || "/tmp/mysql_demo.sock";
     const localDataDir = "/tmp/mysql_demo_data";
     const mysqldBin = "/usr/local/mysql/bin/mysqld";
@@ -596,6 +618,10 @@ async function loginHandler(req, res) {
       return res.status(400).json({ success: false, message: "Invalid account role." });
     }
 
+    if (identifier.length > 255 || password.length > 1024) return res.status(400).json({ success: false, message: "Invalid credential length." });
+    if (!allowAttempt(loginAttempts, identifier, 10, 15 * 60 * 1000)) {
+      return res.status(429).json({ success: false, message: "Too many login attempts. Try again in 15 minutes." });
+    }
     const [[user]] = await pool.query(
       "SELECT * FROM users WHERE LOWER(email) = ? OR LOWER(username) = ? LIMIT 1",
       [identifier, identifier]
@@ -610,6 +636,7 @@ async function loginHandler(req, res) {
       await pool.query("UPDATE users SET password_hash = ? WHERE user_id = ?", [hashPassword(password), user.user_id]);
     }
     await createSession(req, res, user.user_id);
+    loginAttempts.delete(identifier);
     return res.json({ success: true, user: await getUserWithProfile(user.user_id) });
   } catch (err) {
     console.error("Login error:", err.message);
@@ -833,7 +860,7 @@ app.get("/api/admin/users", async (req, res) => {
 app.get("/api/admin/bookings", async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT * FROM bookings ORDER BY recordedAt DESC");
-    res.json({ success: true, bookings: rows });
+    res.json({ success: true, bookings: rows.map(hideHandoverOtp) });
   } catch (err) {
     res.status(500).json({ success: false, message: "Failed to fetch bookings." });
   }
@@ -858,7 +885,7 @@ app.get("/api/owner/bookings", async (req, res) => {
        ORDER BY b.recordedAt DESC`,
       [req.user.user_id, req.user.user_id]
     );
-    res.json({ success: true, bookings: rows });
+    res.json({ success: true, bookings: rows.map(hideHandoverOtp) });
   } catch (err) {
     console.error("Owner bookings error:", err.message);
     res.status(500).json({ success: false, message: "Failed to fetch owner bookings." });
@@ -1204,7 +1231,7 @@ app.post("/api/inquiries", async (req, res) => {
 app.get("/api/bookings", async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT * FROM bookings ORDER BY recordedAt DESC");
-    res.json({ success: true, bookings: rows });
+    res.json({ success: true, bookings: rows.map(hideHandoverOtp) });
   } catch (err) {
     res.status(500).json({ success: false, message: "Failed to fetch bookings." });
   }
@@ -1323,7 +1350,7 @@ app.patch("/api/bookings/:id/extend", async (req, res) => {
       [newDays, newPlan, newTotal, id]
     );
     const [[booking]] = await pool.query("SELECT * FROM bookings WHERE id = ?", [id]);
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: req.user.role === "CUSTOMER" ? booking : hideHandoverOtp(booking) });
   } catch (err) {
     res.status(500).json({ success: false, message: "Failed to extend booking." });
   }
@@ -1339,16 +1366,25 @@ app.patch("/api/bookings/:id/verify-otp", async (req, res) => {
       return res.status(403).json({ success: false, message: "You can only verify handover for vehicles you own." });
     }
 
+    if (existing.bookingStatus === "ACTIVE_RENTAL") return res.status(409).json({ success: false, message: "Handover already verified." });
+    if (!/^\d{4}$/.test(String(handoverOtp).trim()) || !Number.isFinite(Number(odometer)) || Number(odometer) < 0) {
+      return res.status(400).json({ success: false, message: "Enter a valid OTP and odometer reading." });
+    }
+    if (!allowAttempt(otpAttempts, id, 5, 15 * 60 * 1000)) {
+      return res.status(429).json({ success: false, message: "Too many OTP attempts. Try again in 15 minutes." });
+    }
     if (String(existing.handoverOtp).trim() !== String(handoverOtp).trim()) {
       return res.status(400).json({ success: false, message: "Incorrect 4-digit Handover OTP." });
     }
 
-    await pool.query(
-      "UPDATE bookings SET bookingStatus = 'ACTIVE_RENTAL', deliveryStatus = 'HANDOVER VERIFIED / ON TRIP', startOdometer = ? WHERE id = ?",
-      [Number(odometer) || 0, id]
+    const [updated] = await pool.query(
+      "UPDATE bookings SET bookingStatus = 'ACTIVE_RENTAL', deliveryStatus = 'HANDOVER VERIFIED / ON TRIP', startOdometer = ? WHERE id = ? AND bookingStatus <> 'ACTIVE_RENTAL'",
+      [Number(odometer), id]
     );
+    if (!updated.affectedRows) return res.status(409).json({ success: false, message: "Handover already verified." });
+    otpAttempts.delete(id);
     const [[booking]] = await pool.query("SELECT * FROM bookings WHERE id = ?", [id]);
-    res.json({ success: true, booking });
+    res.json({ success: true, booking: hideHandoverOtp(booking) });
   } catch (err) {
     res.status(500).json({ success: false, message: "Failed to verify OTP." });
   }
